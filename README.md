@@ -118,6 +118,23 @@ Check internet connection
 Verify URL is valid and video is accessible
 Update yt-dlp: pip install -U yt-dlp
 
+### Speaker Diarization Issues on Windows
+
+If you encounter permission errors with speaker diarization:
+
+1. First method: Run the application as administrator
+2. Second method: Disable and re-enable speaker diarization
+3. If both fail, you can:
+   - Continue without speaker diarization
+   - Try processing smaller audio files
+   - Use the basic transcription and add speaker labels manually
+
+Note: The diarization feature works best with:
+- Clear audio quality
+- Limited background noise
+- Distinct speaker voices
+- Audio files under 30 minutes
+
 # Dependencies
 
 Required packages:
