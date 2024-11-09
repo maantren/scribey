@@ -20,7 +20,7 @@ cd transcription-tool
 
 Install required Python packages:
 
-pip install openai-whisper yt-dlp tkinterdnd2 ffmpeg-python
+pip install openai-whisper yt-dlp tkinterdnd2 ffmpeg-python requests torch pyannote.audio
 
 For speaker diarization support (optional):
 
@@ -79,10 +79,18 @@ Speaker labels included when diarization enabled
 
 # Speaker Diarization Setup
 
-Create account at HuggingFace
-Generate token at https://huggingface.co/settings/tokens
-Add token in app's Settings tab
-Enable speaker diarization checkbox when transcribing
+Speaker diarization requires additional setup:
+
+Create a HuggingFace account at https://huggingface.co/join
+Go to https://huggingface.co/settings/tokens
+Create a new Access Token with 'read' role
+Accept the user conditions for both models:
+
+Visit https://huggingface.co/pyannote/speaker-diarization
+Visit https://huggingface.co/pyannote/segmentation
+
+
+Add your token in the app's Settings tabg
 
 # Supported File Formats
 
@@ -99,9 +107,10 @@ Restart application after installation
 
 Diarization not working:
 
-Verify HuggingFace token in Settings
+Verify HuggingFace token is valid
+Ensure you've accepted terms for both models
 Check internet connection
-Ensure pyannote.audio is installed
+Try alternative diarization method if primary fails
 
 YouTube download fails:
 
@@ -111,13 +120,22 @@ Update yt-dlp: pip install -U yt-dlp
 
 # Dependencies
 
+Required packages:
+
 Python 3.8+
 openai-whisper
 yt-dlp
 tkinterdnd2
 ffmpeg-python
-pyannote.audio (optional)
-torch (optional)
+requests
+torch
+pyannote.audio
+
+System requirements:
+
+FFmpeg installed and in PATH
+Internet connection for YouTube and diarization
+Sufficient disk space for temporary files
 
 Development
 The application structure:
@@ -143,10 +161,18 @@ GPL
 OpenAI's Whisper for transcription
 pyannote.audio for diarization
 yt-dlp for YouTube support
+HuggingFace for model hosting
 
 # Maintainers
 Maantren - Initial work - github.com/maantren
 Version History
+
+1.1.0
+
+Enhanced speaker diarization handling
+Added alternative diarization method
+Improved error handling and user feedback
+Custom output naming options
 
 1.0.0
 
@@ -154,3 +180,5 @@ Initial Release
 Basic transcription functionality
 YouTube support
 Speaker diarization
+
+
