@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
+from tkinterdnd2 import DND_FILES, TkinterDnD
 import threading
 import whisper
 import yt_dlp
@@ -7,13 +8,17 @@ import os
 import sys
 import re
 import json
-from tkinterdnd2 import DND_FILES, TkinterDnD
 from urllib.parse import urlparse
 import subprocess
 from pathlib import Path
 import torch
+import warnings
+import requests
+import traceback
+import webbrowser
 from datetime import datetime
 import queue
+import shutil
 
 # Constants and Configuration
 DEPENDENCIES = {
@@ -28,6 +33,42 @@ To use speaker diarization, you need a HuggingFace token:
 2. Create a new token
 3. Save it in the settings
 """
+
+class ChoiceDialog(tk.Toplevel):
+    def __init__(self, parent, title, message):
+        super().__init__(parent)
+        self.title(title)
+        self.result = None
+        
+        # Make dialog modal
+        self.transient(parent)
+        self.grab_set()
+        
+        # Create widgets
+        ttk.Label(self, text=message, wraplength=400, padding=20).pack()
+        
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(pady=10)
+        
+        ttk.Button(btn_frame, 
+                  text="Continue without diarization", 
+                  command=lambda: self.set_result(1)).pack(pady=5)
+        ttk.Button(btn_frame, 
+                  text="Try alternative method", 
+                  command=lambda: self.set_result(2)).pack(pady=5)
+        ttk.Button(btn_frame, 
+                  text="Cancel transcription", 
+                  command=lambda: self.set_result(3)).pack(pady=5)
+        
+        # Center the dialog
+        self.geometry("+%d+%d" % (parent.winfo_rootx()+50,
+                                 parent.winfo_rooty()+50))
+        
+        self.wait_window(self)
+    
+    def set_result(self, value):
+        self.result = value
+        self.destroy()
 
 class Settings:
     def __init__(self):
@@ -216,14 +257,111 @@ class TranscriptionWorker:
             
             if not token:
                 raise ValueError("No HuggingFace token found in settings")
+            
+            # Suppress torchaudio warning
+            import warnings
+            warnings.filterwarnings("ignore", message=".*torchaudio.*backend.*")
+            
+            try:
+                # First try to load the pipeline
+                self.callback.on_status("Loading diarization model...")
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization",
+                    use_auth_token=token
+                )
+
+                self.callback.on_status("Performing speaker diarization...")
+                diarization = pipeline(audio_path)
                 
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization",
-                use_auth_token=token
+                # Process results
+                speakers = []
+                for turn, _, speaker in diarization.itertracks(yield_label=True):
+                    speakers.append({
+                        'start': turn.start,
+                        'end': turn.end,
+                        'speaker': speaker
+                    })
+                
+                # Add speaker information to whisper segments
+                for segment in whisper_result["segments"]:
+                    # Find matching speaker
+                    for speaker in speakers:
+                        if (segment['start'] >= speaker['start'] and 
+                            segment['end'] <= speaker['end']):
+                            segment['speaker'] = speaker['speaker']
+                            break
+                
+                return whisper_result
+
+            except Exception as e:
+                error_msg = str(e)
+                if "gated" in error_msg.lower() or "private" in error_msg.lower():
+                    error_msg = (
+                        "Please accept the model terms for both:\n"
+                        "1. https://huggingface.co/pyannote/speaker-diarization\n"
+                        "2. https://huggingface.co/pyannote/segmentation\n\n"
+                        "After accepting, ensure your token has 'read' access."
+                    )
+                elif "connection" in error_msg.lower():
+                    error_msg = "Failed to connect. Please check your internet connection."
+                
+                dialog = ChoiceDialog(
+                    self.callback.root,
+                    "Diarization Failed",
+                    f"Diarization failed: {error_msg}\n\nWhat would you like to do?"
+                )
+                
+                if dialog.result == 1:  # Continue without
+                    return whisper_result
+                elif dialog.result == 2:  # Try alternative
+                    return self._alternative_diarization(whisper_result, audio_path)
+                else:  # Cancel
+                    raise ValueError("Transcription cancelled by user")
+
+        except Exception as e:
+            self.callback.on_status(f"Diarization failed: {str(e)}")
+            # Log the full error for debugging
+            import traceback
+            self.callback.log(f"Full diarization error:\n{traceback.format_exc()}")
+            
+            dialog = ChoiceDialog(
+                self.callback.root,
+                "Diarization Failed",
+                f"Diarization failed: {str(e)}\n\nWhat would you like to do?"
             )
             
-            # Combine whisper results with diarization
-            # This is a simplified version - we'd want to do proper timestamp matching
+            if dialog.result == 1:  # Continue without
+                return whisper_result
+            elif dialog.result == 2:  # Try alternative
+                return self._alternative_diarization(whisper_result, audio_path)
+            else:  # Cancel
+                raise ValueError("Transcription cancelled by user")
+
+    def _alternative_diarization(self, whisper_result, audio_path):
+        """Alternative diarization method using direct command execution"""
+        try:
+            import torch
+            self.callback.on_status("Attempting alternative diarization method...")
+            
+            # Create temporary directory for intermediate files
+            temp_dir = "temp_diarization"
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # Save segments to temporary file
+            segments_file = os.path.join(temp_dir, "segments.txt")
+            with open(segments_file, "w", encoding="utf-8") as f:
+                for segment in whisper_result["segments"]:
+                    f.write(f"{segment['start']:.3f} {segment['end']:.3f} {segment['text']}\n")
+            
+            # Run diarization using torch directly
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model = torch.hub.load('pyannote/pyannote-audio', 'speaker_diarization',
+                                use_auth_token=self.callback.settings.current.get("hf_token"))
+            model.to(device)
+            
+            diarization = model(audio_path)
+            
+            # Process results
             speakers = []
             for turn, _, speaker in diarization.itertracks(yield_label=True):
                 speakers.append({
@@ -242,9 +380,25 @@ class TranscriptionWorker:
                         break
             
             return whisper_result
+            
         except Exception as e:
-            print(f"Diarization failed: {str(e)}")
-            return whisper_result
+            self.callback.on_status(f"Alternative diarization failed: {str(e)}")
+            self.callback.log(f"Alternative diarization error:\n{traceback.format_exc()}")
+            
+            if messagebox.askyesno("Alternative Method Failed",
+                "Alternative diarization method also failed.\n\n"
+                "Would you like to continue without speaker diarization?"):
+                return whisper_result
+            else:
+                raise ValueError("Transcription cancelled by user")
+                
+        finally:
+            # Clean up temporary files
+            try:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+            except:
+                pass
 
     def _save_transcript(self, result, output_path, options):
         with open(output_path, "w", encoding="utf-8") as f:
@@ -478,6 +632,56 @@ class TranscriptionGUI:
         ttk.Checkbutton(defaults_frame, text="Dark Mode", 
                        variable=tk.BooleanVar(value=self.settings.current["dark_mode"]),
                        command=self.toggle_theme).pack()
+        
+        ttk.Label(token_frame, text="Note: Token must have 'Read public gated models' permission", 
+              wraplength=400).pack(pady=5)
+    
+        link = ttk.Label(token_frame, 
+                        text="Configure token permissions", 
+                        foreground="blue", 
+                        cursor="hand2")
+        link.pack(pady=5)
+        link.bind("<Button-1>", lambda e: webbrowser.open("https://huggingface.co/settings/tokens"))
+        
+    def verify_huggingface_token(self):
+        """Verify HuggingFace token and model access"""
+        if not self.speaker_diarization.get():
+            return True
+            
+        token = self.settings.current.get("hf_token")
+        if not token:
+            messagebox.showerror("Error", 
+                "HuggingFace token not found. Please add it in Settings.")
+            return False
+        
+        models = [
+            "pyannote/speaker-diarization",
+            "pyannote/segmentation"
+        ]
+        
+        try:
+            for model in models:
+                response = requests.get(
+                    f"https://huggingface.co/{model}",
+                    headers={"Authorization": f"Bearer {token}"}
+                )
+                
+                if response.status_code != 200:
+                    messagebox.showwarning("Model Access Required", 
+                        f"Please accept the terms for {model}:\n\n"
+                        f"1. Visit https://huggingface.co/{model}\n"
+                        "2. Accept the user conditions\n"
+                        "3. Ensure your token has 'read' access\n\n"
+                        "After completing these steps, try again.")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            messagebox.showerror("Error", 
+                f"Failed to verify model access: {str(e)}\n"
+                "Please check your internet connection.")
+            return False
 
     def check_diarization(self):
         if self.speaker_diarization.get():
@@ -569,21 +773,24 @@ class TranscriptionGUI:
         if not self.input_paths:
             messagebox.showwarning("Warning", "Please add input files first.")
             return
-    
+        
         if not self.output_path.get():
             messagebox.showwarning("Warning", "Please select an output directory.")
             return
-    
+        
+        # Verify HuggingFace token if diarization is enabled
+        if self.speaker_diarization.get() and not self.verify_huggingface_token():
+            return
+        
         options = {
             "include_timestamps": self.timestamps.get(),
             "use_diarization": self.speaker_diarization.get(),
         }
-    
+        
         for idx, input_path in enumerate(self.input_paths):
             output_filename = self.get_output_filename(input_path, idx)
             output_path = os.path.join(self.output_path.get(), output_filename)
-        
-        # Check if file exists
+            
             if os.path.exists(output_path):
                 if not messagebox.askyesno("File exists", 
                     f"{output_filename} already exists. Overwrite?"):
