@@ -1,201 +1,194 @@
-# Scribey
-A Python-based GUI application for transcribing audio and video files using OpenAI's Whisper model. Supports batch processing, YouTube videos, and optional speaker diarization.
+# Scribey - Advanced Audio Transcription Tool
 
-# Features
+A powerful, user-friendly GUI application for transcribing audio and video files using OpenAI's Whisper model, with support for speaker diarization, batch processing, and YouTube video transcription.
 
-🎯 Transcribe audio and video files with OpenAI's Whisper
-📺 Support for YouTube video transcription
-👥 Optional speaker diarization (requires HuggingFace token)
-📦 Batch processing capability
-⌛ Timestamp inclusion options
-🎭 Multiple model sizes (tiny to large)
-🖱️ Drag-and-drop interface
-💾 Flexible output naming options
+## Features
 
-# Installation
-Clone this repository:
+- 🎯 **Smart Transcription**: Uses OpenAI's Whisper model for accurate speech-to-text conversion
+- 👥 **Speaker Detection**: Identifies different speakers in the audio
+- 📺 **YouTube Support**: Direct transcription from YouTube URLs
+- 📦 **Batch Processing**: Handle multiple files efficiently
+- 🖱️ **User-Friendly**: Simple drag-and-drop interface
+- ⚡ **Smart Processing**: Handles large files through intelligent chunking
+- 🎛️ **Multiple Models**: Choose from different Whisper models based on your needs
 
-clone https://github.com/maantren/scribey.git
-cd transcription-tool
+## Complete Installation Guide
 
-Install required Python packages:
+### 1. Install Python
 
-pip install openai-whisper yt-dlp tkinterdnd2 ffmpeg-python requests torch pyannote.audio
+1. Download Python 3.8 or higher from [python.org](https://www.python.org/downloads/)
+2. During installation:
+   - ✅ Check "Add Python to PATH"
+   - ✅ Check "Install pip"
+   - ✅ Check "Install for all users" (recommended)
 
-For speaker diarization support (optional):
+3. Verify installation by opening Command Prompt and typing:
+   ```bash
+   python --version
+   pip --version
+   ```
 
-pip install pyannote.audio torch
+### 2. Install FFmpeg
 
-Install FFmpeg:
+#### Windows:
+Option 1 - Using Chocolatey (Recommended):
+1. Install [Chocolatey](https://chocolatey.org/install)
+2. Open Command Prompt as Administrator and run:
+   ```bash
+   choco install ffmpeg
+   ```
 
-Windows: Install using Chocolatey:
-choco install ffmpeg
-Or download manually from FFmpeg's official site
-macOS: Install using Homebrew:
+Option 2 - Manual Installation:
+1. Download FFmpeg from [ffmpeg.org](https://ffmpeg.org/download.html)
+2. Extract to a folder (e.g., C:\ffmpeg)
+3. Add to PATH:
+   - Search "Environment Variables" in Windows search
+   - Edit System Variables
+   - Add FFmpeg's bin folder to Path (e.g., C:\ffmpeg\bin)
+
+#### macOS:
+```bash
 brew install ffmpeg
+```
 
-Linux:
-sudo apt-get update && sudo apt-get install ffmpeg
+#### Linux:
+```bash
+sudo apt update
+sudo apt install ffmpeg
+```
 
-# Usage
+### 3. Install Required Python Packages
 
-Run the application:
-python scribey.py
+1. Download or clone this repository:
+   ```bash
+   git clone https://github.com/yourusername/scribey.git
+   cd scribey
+   ```
 
-Basic Transcription:
+2. Install required packages:
+   ```bash
+   pip install openai-whisper
+   pip install yt-dlp
+   pip install tkinterdnd2
+   pip install ffmpeg-python
+   pip install torch
+   pip install pyannote.audio
+   pip install pydub
+   ```
 
-Click "Add Files" or drag and drop audio/video files
-Select output directory
-Choose model size and options
-Click "Start Transcription"
+### 4. Set Up Speaker Diarization (Optional)
 
-YouTube Videos:
+1. Create a HuggingFace account at [huggingface.co](https://huggingface.co/join)
+2. Get your access token:
+   - Go to [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+   - Create new token with 'read' access
+3. Accept the model terms:
+   - Visit [pyannote/speaker-diarization](https://huggingface.co/pyannote/speaker-diarization)
+   - Visit [pyannote/segmentation](https://huggingface.co/pyannote/segmentation)
+   - Click "Accept" on both model pages
+4. Enter your token in Scribey's Settings tab
 
-Switch to "YouTube URL" mode
-Enter YouTube URL
-Select output options
-Click "Start Transcription"
+## Usage
 
-Speaker Diarization:
+1. Launch the application:
+   ```bash
+   python Scribey.py
+   ```
 
-Enable "Speaker Diarization" checkbox
-Add HuggingFace token in Settings tab
-Process files as normal
+2. Add files:
+   - Click "Add Files" or drag-and-drop
+   - Supported formats: mp3, wav, m4a, mp4, avi, mov, mkv, webm
 
-Model Sizes
+3. Configure options:
+   - Select Whisper model (tiny to large)
+   - Enable/disable speaker diarization
+   - Choose output format
 
-tiny: Fastest, lowest accuracy
-base: Good balance of speed and accuracy
-small: Better accuracy, slower
-medium: High accuracy, slower
-large: Best accuracy, slowest
+4. Click "Start Transcription"
 
-File Output Options
+## Technical Details
 
-Automatic: Uses input filename + "_transcript"
-Custom prefix: User-defined prefix for output files
-Timestamps can be included in output
-Speaker labels included when diarization enabled
+### Large File Processing
 
-# Speaker Diarization Setup
+Scribey uses smart chunking for processing large files:
+- Audio files are automatically split into 30-minute segments
+- Each segment is processed independently
+- Results are merged seamlessly
+- Speakers are tracked consistently across chunks
+- Memory usage is optimized for large files
 
-Speaker diarization requires additional setup:
+This approach allows Scribey to handle files of any length while maintaining consistent speaker identification and transcription quality.
 
-Create a HuggingFace account at https://huggingface.co/join
-Go to https://huggingface.co/settings/tokens
-Create a new Access Token with 'read' role
-Accept the user conditions for both models:
+### Output Format
 
-Visit https://huggingface.co/pyannote/speaker-diarization
-Visit https://huggingface.co/pyannote/segmentation
+The transcript is formatted with clear speaker separation:
+```
+SPEAKER 1
+This is the first speaker talking.
 
+SPEAKER 2
+This is the second speaker responding.
+```
 
-Add your token in the app's Settings tabg
+Optional timestamps can be included:
+```
+SPEAKER 1
+[0.00s - 2.34s] This is the first speaker talking.
 
-# Supported File Formats
+SPEAKER 2
+[2.34s - 4.56s] This is the second speaker responding.
+```
 
-Audio: mp3, wav, m4a
-Video: mp4, avi, mov, mkv, webm
-YouTube URLs
+## Troubleshooting
 
-# Common Issues & Solutions
+### Common Issues:
 
-FFmpeg not found:
+1. **FFmpeg Not Found**:
+   - Verify FFmpeg is installed: `ffmpeg -version`
+   - Check if it's in your system PATH
+   - Try reinstalling FFmpeg
 
-Ensure FFmpeg is installed and in system PATH
-Restart application after installation
+2. **Speaker Diarization Issues**:
+   - Verify your HuggingFace token
+   - Ensure you've accepted both model terms
+   - For large files, expect longer processing times
+   - GPU acceleration is recommended but not required
 
-Diarization not working:
+3. **Memory Issues**:
+   - The application automatically manages memory for large files
+   - Consider using a smaller Whisper model for faster processing
+   - For very large files, the chunking system will handle processing automatically
 
-Verify HuggingFace token is valid
-Ensure you've accepted terms for both models
-Check internet connection
-Try alternative diarization method if primary fails
+### Performance Tips:
 
-YouTube download fails:
+1. **Model Selection**:
+   - tiny: Fastest, lowest accuracy
+   - base: Good balance (recommended)
+   - small: Better accuracy, slower
+   - medium: High accuracy, slower
+   - large: Best accuracy, slowest
 
-Check internet connection
-Verify URL is valid and video is accessible
-Update yt-dlp: pip install -U yt-dlp
+2. **Processing Time**:
+   - Transcription: ~0.3-0.5x audio duration with GPU
+   - Diarization: ~0.3-2x audio duration depending on hardware
+   - Total time varies based on file length and chosen options
 
-### Speaker Diarization Issues on Windows
+## Contributing
 
-If you encounter permission errors with speaker diarization:
+Contributions are welcome! Please:
+1. Fork the repository
+2. Create your feature branch
+3. Commit your changes
+4. Push to the branch
+5. Submit a pull request
 
-1. First method: Run the application as administrator
-2. Second method: Disable and re-enable speaker diarization
-3. If both fail, you can:
-   - Continue without speaker diarization
-   - Try processing smaller audio files
-   - Use the basic transcription and add speaker labels manually
+## License
 
-Note: The diarization feature works best with:
-- Clear audio quality
-- Limited background noise
-- Distinct speaker voices
-- Audio files under 30 minutes
+MIT License - See LICENSE file for details
 
-# Dependencies
+## Acknowledgments
 
-Required packages:
-
-Python 3.8+
-openai-whisper
-yt-dlp
-tkinterdnd2
-ffmpeg-python
-requests
-torch
-pyannote.audio
-
-System requirements:
-
-FFmpeg installed and in PATH
-Internet connection for YouTube and diarization
-Sufficient disk space for temporary files
-
-Development
-The application structure:
-scribey.py
-├── TranscriptionGUI (Main GUI class)
-├── TranscriptionWorker (Background processing)
-├── DependencyManager (Package management)
-└── Settings (User preferences)
-
-# Contributing
-
-Fork the repository
-Create feature branch
-Commit changes
-Push to branch
-Open Pull Request
-
-# License
-GPL
-
-# Acknowledgments
-
-OpenAI's Whisper for transcription
-pyannote.audio for diarization
-yt-dlp for YouTube support
-HuggingFace for model hosting
-
-# Maintainers
-Maantren - Initial work - github.com/maantren
-Version History
-
-1.1.0
-
-Enhanced speaker diarization handling
-Added alternative diarization method
-Improved error handling and user feedback
-Custom output naming options
-
-1.0.0
-
-Initial Release
-Basic transcription functionality
-YouTube support
-Speaker diarization
-
-
+- OpenAI's Whisper for transcription
+- pyannote.audio for speaker diarization
+- yt-dlp for YouTube support
+- HuggingFace for model hosting

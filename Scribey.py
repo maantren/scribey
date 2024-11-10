@@ -19,6 +19,8 @@ import webbrowser
 from datetime import datetime
 import queue
 import shutil
+import subprocess
+from pathlib import Path
 
 # Constants and Configuration
 DEPENDENCIES = {
@@ -173,6 +175,19 @@ class TranscriptionWorker:
         self.running = True
         self.thread = threading.Thread(target=self._process_queue, daemon=True)
         self.thread.start()
+        self.speaker_map = {}  # Add this line to store speaker mappings
+
+    def _get_speaker_label(self, original_label):
+        """Convert pyannote speaker labels to friendly names"""
+        if original_label == "UNKNOWN":
+            return "UNKNOWN"
+            
+        if original_label not in self.speaker_map:
+            # Create new speaker number (1-based indexing)
+            speaker_num = len(self.speaker_map) + 1
+            self.speaker_map[original_label] = f"{speaker_num}"
+            
+        return self.speaker_map[original_label]
 
     def _process_queue(self):
         while self.running:
@@ -249,80 +264,124 @@ class TranscriptionWorker:
             ydl.download([url])
         return temp_path
 
+
     def _add_speaker_diarization(self, whisper_result, audio_path):
+        """Add speaker diarization with chunking for large files"""
+        import time
+        from pydub import AudioSegment
+        import numpy as np
+        import torch
+        from pyannote.audio import Pipeline
+        import tempfile
+        import os
+        
+        process_start_time = time.time()  # Renamed to avoid conflict
+        chunk_duration = 30 * 60  # 30 minutes in seconds
+        
         try:
-            from pyannote.audio import Pipeline
-            settings = Settings().current
-            token = settings.get("hf_token")
+            # Load audio file
+            audio = AudioSegment.from_file(audio_path)
+            total_duration = len(audio) / 1000  # Convert to seconds
             
-            if not token:
-                raise ValueError("No HuggingFace token found in settings")
+            # Log GPU availability
+            gpu_available = torch.cuda.is_available()
+            self.callback.on_status(f"GPU {'available' if gpu_available else 'not available'} for diarization")
             
-            # Suppress torchaudio warning
-            import warnings
-            warnings.filterwarnings("ignore", message=".*torchaudio.*backend.*")
+            # Initialize pipeline
+            pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization",
+                use_auth_token=self.callback.settings.current.get("hf_token")
+            )
             
-            try:
-                # First try to load the pipeline
-                self.callback.on_status("Loading diarization model...")
-                pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization",
-                    use_auth_token=token
-                )
-
-                self.callback.on_status("Performing speaker diarization...")
-                diarization = pipeline(audio_path)
+            if gpu_available:
+                pipeline = pipeline.to(torch.device("cuda"))
+            
+            all_speakers = []
+            
+            # Process in chunks
+            for chunk_start in range(0, len(audio), chunk_duration * 1000):
+                chunk_end = min(chunk_start + chunk_duration * 1000, len(audio))
                 
-                # Process results
-                speakers = []
-                for turn, _, speaker in diarization.itertracks(yield_label=True):
-                    speakers.append({
-                        'start': turn.start,
-                        'end': turn.end,
-                        'speaker': speaker
-                    })
+                # Extract chunk
+                chunk = audio[chunk_start:chunk_end]
                 
-                # Add speaker information to whisper segments
-                for segment in whisper_result["segments"]:
-                    # Find matching speaker
-                    for speaker in speakers:
-                        if (segment['start'] >= speaker['start'] and 
-                            segment['end'] <= speaker['end']):
-                            segment['speaker'] = speaker['speaker']
-                            break
+                # Save chunk to temporary file
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+                    chunk.export(temp_file.name, format='wav')
+                    
+                    try:
+                        # Process chunk
+                        self.callback.on_status(
+                            f"Processing audio segment {chunk_start/1000:.0f}s - {chunk_end/1000:.0f}s..."
+                        )
+                        diarization = pipeline(temp_file.name)
+                        
+                        # Adjust timestamps and collect speakers
+                        for turn, _, speaker in diarization.itertracks(yield_label=True):
+                            all_speakers.append({
+                                'start': turn.start + (start_time/1000),  # Convert to seconds
+                                'end': turn.end + (start_time/1000),
+                                'speaker': speaker
+                            })
+                    finally:
+                        # Clean up temp file
+                        try:
+                            os.unlink(temp_file.name)
+                        except:
+                            pass
+            
+            # Sort speakers by start time
+            all_speakers.sort(key=lambda x: x['start'])
+            
+            # Merge adjacent segments with same speaker
+            merged_speakers = []
+            current = None
+            
+            for speaker in all_speakers:
+                if current is None:
+                    current = speaker.copy()
+                elif (speaker['speaker'] == current['speaker'] and 
+                      speaker['start'] - current['end'] < 0.5):  # 500ms threshold
+                    current['end'] = speaker['end']
+                else:
+                    merged_speakers.append(current)
+                    current = speaker.copy()
+                    
+            if current:
+                merged_speakers.append(current)
+            
+            # Reset speaker map for new file
+            self.speaker_map = {}
+            
+            # Add speaker information to whisper segments
+            for segment in whisper_result["segments"]:
+                matching_speakers = []
+                for speaker in merged_speakers:
+                    if (segment['start'] >= speaker['start'] and 
+                        segment['end'] <= speaker['end']):
+                        matching_speakers.append(speaker['speaker'])
                 
-                return whisper_result
-
-            except Exception as e:
-                error_msg = str(e)
-                if "gated" in error_msg.lower() or "private" in error_msg.lower():
-                    error_msg = (
-                        "Please accept the model terms for both:\n"
-                        "1. https://huggingface.co/pyannote/speaker-diarization\n"
-                        "2. https://huggingface.co/pyannote/segmentation\n\n"
-                        "After accepting, ensure your token has 'read' access."
-                    )
-                elif "connection" in error_msg.lower():
-                    error_msg = "Failed to connect. Please check your internet connection."
-                
-                dialog = ChoiceDialog(
-                    self.callback.root,
-                    "Diarization Failed",
-                    f"Diarization failed: {error_msg}\n\nWhat would you like to do?"
-                )
-                
-                if dialog.result == 1:  # Continue without
-                    return whisper_result
-                elif dialog.result == 2:  # Try alternative
-                    return self._alternative_diarization(whisper_result, audio_path)
-                else:  # Cancel
-                    raise ValueError("Transcription cancelled by user")
-
+                if matching_speakers:
+                    # Use most common speaker if multiple matches
+                    from collections import Counter
+                    original_speaker = Counter(matching_speakers).most_common(1)[0][0]
+                    segment['speaker'] = self._get_speaker_label(original_speaker)
+                else:
+                    segment['speaker'] = "UNKNOWN"
+            
+            total_time = time.time() - process_start_time
+            self.callback.log(f"Total diarization time for {total_duration:.1f}s audio: {total_time:.1f}s")
+            
+            # Log speaker mapping for reference
+            self.callback.log("\nSpeaker mapping:")
+            for original, friendly in self.speaker_map.items():
+                self.callback.log(f"Speaker {friendly} (original ID: {original})")
+            
+            return whisper_result
+            
         except Exception as e:
-            self.callback.on_status(f"Diarization failed: {str(e)}")
-            # Log the full error for debugging
-            import traceback
-            self.callback.log(f"Full diarization error:\n{traceback.format_exc()}")
+            self.callback.log(f"Diarization error: {str(e)}")
+            self.callback.log(f"Failed after {time.time() - start_time:.1f} seconds")
             
             dialog = ChoiceDialog(
                 self.callback.root,
@@ -338,28 +397,19 @@ class TranscriptionWorker:
                 raise ValueError("Transcription cancelled by user")
 
     def _alternative_diarization(self, whisper_result, audio_path):
-        """Alternative diarization method using direct command execution"""
+        """Alternative diarization method using direct pipeline"""
         try:
-            import torch
             self.callback.on_status("Attempting alternative diarization method...")
             
-            # Create temporary directory for intermediate files
-            temp_dir = "temp_diarization"
-            os.makedirs(temp_dir, exist_ok=True)
-            
-            # Save segments to temporary file
-            segments_file = os.path.join(temp_dir, "segments.txt")
-            with open(segments_file, "w", encoding="utf-8") as f:
-                for segment in whisper_result["segments"]:
-                    f.write(f"{segment['start']:.3f} {segment['end']:.3f} {segment['text']}\n")
-            
-            # Run diarization using torch directly
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            model = torch.hub.load('pyannote/pyannote-audio', 'speaker_diarization',
-                                use_auth_token=self.callback.settings.current.get("hf_token"))
-            model.to(device)
-            
-            diarization = model(audio_path)
+            # Try using a different model configuration
+            pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization@2.1",
+                use_auth_token=self.callback.settings.current.get("hf_token")
+            )
+
+            # Apply diarization
+            self.callback.on_status("Running diarization...")
+            diarization = pipeline(audio_path)
             
             # Process results
             speakers = []
@@ -372,12 +422,18 @@ class TranscriptionWorker:
             
             # Add speaker information to whisper segments
             for segment in whisper_result["segments"]:
-                # Find matching speaker
+                matching_speakers = []
                 for speaker in speakers:
                     if (segment['start'] >= speaker['start'] and 
                         segment['end'] <= speaker['end']):
-                        segment['speaker'] = speaker['speaker']
-                        break
+                        matching_speakers.append(speaker['speaker'])
+                
+                if matching_speakers:
+                    # If multiple speakers found, use the most common one
+                    from collections import Counter
+                    segment['speaker'] = Counter(matching_speakers).most_common(1)[0][0]
+                else:
+                    segment['speaker'] = "UNKNOWN"
             
             return whisper_result
             
@@ -391,24 +447,38 @@ class TranscriptionWorker:
                 return whisper_result
             else:
                 raise ValueError("Transcription cancelled by user")
-                
-        finally:
-            # Clean up temporary files
-            try:
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
-            except:
-                pass
 
     def _save_transcript(self, result, output_path, options):
+        """Save transcript with improved formatting for speaker diarization"""
         with open(output_path, "w", encoding="utf-8") as f:
-            if options.get("include_timestamps"):
-                for segment in result["segments"]:
-                    timestamp = f"[{segment['start']:.2f}s - {segment['end']:.2f}s]"
-                    speaker = f"[{segment.get('speaker', 'Unknown')}] " if options.get("use_diarization") else ""
-                    f.write(f"{timestamp} {speaker}{segment['text']}\n")
-            else:
-                f.write(result["text"])
+            current_speaker = None
+            
+            for segment in result["segments"]:
+                # Get timestamp if needed
+                timestamp = ""
+                if options.get("include_timestamps"):
+                    timestamp = f"[{segment['start']:.2f}s - {segment['end']:.2f}s] "
+                
+                # Handle speaker changes
+                speaker = segment.get('speaker', 'UNKNOWN')
+                text = segment['text'].strip()
+                
+                # Only write speaker header when speaker changes
+                if speaker != current_speaker:
+                    # Add single blank line between speakers (but not at the start of file)
+                    if current_speaker is not None:
+                        f.write("\n")
+                    f.write(f"SPEAKER {speaker}\n")
+                    current_speaker = speaker
+                
+                # Write the text with optional timestamp
+                if options.get("include_timestamps"):
+                    f.write(f"{timestamp}{text}")
+                else:
+                    f.write(text)
+                
+                # Add a single newline after each utterance
+                f.write("\n")
 
     def add_task(self, input_path, output_path, options):
         self.queue.put((input_path, output_path, options))
@@ -438,8 +508,28 @@ class TranscriptionGUI:
         # Initialize worker
         self.worker = TranscriptionWorker(self)
         
+        self.check_diarization_setup()
         self.setup_ui()
         self.check_initial_dependencies()
+
+    def check_diarization_setup(self):
+        """Check if diarization is properly set up, if not, run setup script"""
+        if self.settings.current.get("use_diarization", False):
+            cache_dir = Path.home() / ".cache" / "pyannote"
+            hub_dir = Path.home() / ".cache" / "hub"
+            
+            if not (cache_dir.exists() and hub_dir.exists()):
+                try:
+                    # Run the setup script
+                    setup_script = Path(__file__).parent / "diarization_setup.py"
+                    result = subprocess.run([sys.executable, str(setup_script), "--setup"],
+                                         capture_output=True, text=True)
+                    
+                    if result.returncode != 0:
+                        self.log("Warning: Diarization setup failed. Some features may not work.")
+                        self.log(f"Setup error: {result.stderr}")
+                except Exception as e:
+                    self.log(f"Error running diarization setup: {e}")   
 
     def check_initial_dependencies(self):
         """Check for required dependencies when the app starts"""
@@ -684,6 +774,7 @@ class TranscriptionGUI:
             return False
 
     def check_diarization(self):
+        """Modified check_diarization method"""
         if self.speaker_diarization.get():
             missing = DependencyManager.check_dependencies('diarization')
             if missing:
@@ -696,6 +787,9 @@ class TranscriptionGUI:
                 else:
                     self.speaker_diarization.set(False)
                     return
+            
+            # Run diarization setup if needed
+            self.check_diarization_setup()
             
             # Check for token in settings
             if not DependencyManager.check_diarization_auth():
