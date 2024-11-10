@@ -81,7 +81,7 @@ sudo apt install ffmpeg
 1. Create a HuggingFace account at [huggingface.co](https://huggingface.co/join)
 2. Get your access token:
    - Go to [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-   - Create new token with 'read' access
+   - Create new token with 'read' access (specifically, 'Read access to contents of all public gated repos you can access' under 'Repositories' - this makes sure that you can use Pyannote, below)
 3. Accept the model terms:
    - Visit [pyannote/speaker-diarization](https://huggingface.co/pyannote/speaker-diarization)
    - Visit [pyannote/segmentation](https://huggingface.co/pyannote/segmentation)
