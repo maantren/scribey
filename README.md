@@ -184,7 +184,7 @@ Contributions are welcome! Please:
 
 ## License
 
-MIT License - See LICENSE file for details
+GPL License - See LICENSE file for details
 
 ## Acknowledgments
 
