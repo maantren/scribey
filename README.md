@@ -173,6 +173,44 @@ SPEAKER 2
    - Diarization: ~0.3-2x audio duration depending on hardware
    - Total time varies based on file length and chosen options
 
+## Key fixes
+**Key Fixes in 1.2.0**
+
+- Fixed YouTube download file handling issues
+- Resolved memory issues with large file diarization
+- Fixed inconsistent speaker labeling across chunks
+- Improved temporary file management
+- Fixed drag-and-drop issues when running as administrator
+- Resolved output formatting inconsistencies
+- Fixed progress display ANSI code issues
+
+## Changelog
+**Version 1.2.0**
+
+- Improved YouTube download reliability and error handling
+- Added proper YouTube URL input dialog
+- Enhanced speaker diarization for large files with chunked processing
+- Improved file queue display with clear YouTube video titles
+- Added automatic cleanup of temporary files
+- Fixed drag-and-drop functionality
+- Added progress indicators for YouTube downloads
+- Separated "Add Files" and "Add YouTube URL" functions for better UX
+
+**Version 1.1.0**
+
+- Enhanced speaker diarization handling
+- Added alternative diarization method
+- Improved error handling and user feedback
+- Added custom output naming options
+- Added batch processing capabilities
+
+**Version 1.0.0**
+
+- Initial Release
+- Basic transcription functionality
+- YouTube support
+- Simple speaker diarization
+
 ## Contributing
 
 Contributions are welcome! Please:
