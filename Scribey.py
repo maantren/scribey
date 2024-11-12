@@ -36,6 +36,50 @@ To use speaker diarization, you need a HuggingFace token:
 3. Save it in the settings
 """
 
+class YouTubeInputDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.result = None
+        
+        # Make dialog modal
+        self.transient(parent)
+        self.grab_set()
+        
+        # Configure dialog
+        self.title("Add YouTube Video")
+        self.geometry("500x150")
+        
+        # Create widgets
+        ttk.Label(self, text="Enter YouTube URL:", padding=10).pack()
+        
+        self.url_var = tk.StringVar()
+        self.entry = ttk.Entry(self, textvariable=self.url_var, width=50)
+        self.entry.pack(padx=10, pady=5)
+        
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(pady=10)
+        
+        ttk.Button(btn_frame, text="Add", command=self._on_add).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=self._on_cancel).pack(side="left", padx=5)
+        
+        # Center dialog on parent
+        self.geometry(f"+{parent.winfo_rootx()+50}+{parent.winfo_rooty()+50}")
+        
+        # Set focus on entry
+        self.entry.focus_set()
+        self.bind("<Return>", lambda e: self._on_add())
+        self.bind("<Escape>", lambda e: self._on_cancel())
+        
+        # Wait for user input
+        self.wait_window(self)
+    
+    def _on_add(self):
+        self.result = self.url_var.get()
+        self.destroy()
+    
+    def _on_cancel(self):
+        self.destroy()
+
 class ChoiceDialog(tk.Toplevel):
     def __init__(self, parent, title, message):
         super().__init__(parent)
@@ -205,24 +249,30 @@ class TranscriptionWorker:
                 self.callback.on_error(str(e))
 
     def _process_task(self, input_path, output_path, options):
+        """Process a single transcription task with proper resource management"""
+        temp_files = []
         try:
             # Download if YouTube
             if self._is_youtube_url(input_path):
                 self.callback.on_status("Downloading YouTube audio...")
-                input_path = self._download_youtube_audio(input_path)
+                temp_audio = self._download_youtube_audio(input_path)
+                temp_files.append(temp_audio)
+                processed_input = temp_audio
+            else:
+                processed_input = input_path
 
-            # Load model (using the parent's model_size setting)
+            # Load model
             self.callback.on_status("Loading Whisper model...")
             model = whisper.load_model(self.callback.model_size.get())
 
-            # Transcribe (without model_size in options)
+            # Transcribe
             self.callback.on_status("Transcribing audio...")
-            result = model.transcribe(input_path)
+            result = model.transcribe(processed_input)
 
             # Handle diarization if requested
             if options.get("use_diarization"):
                 self.callback.on_status("Processing speaker diarization...")
-                result = self._add_speaker_diarization(result, input_path)
+                result = self._add_speaker_diarization(result, processed_input)
 
             # Save output
             self.callback.on_status("Saving transcript...")
@@ -231,14 +281,17 @@ class TranscriptionWorker:
             self.callback.on_complete(output_path)
 
         except Exception as e:
+            self.callback.log(f"Error details: {str(e)}")
             self.callback.on_error(str(e))
         finally:
-            # Cleanup temp files
-            if self._is_youtube_url(input_path):
+            # Clean up temp files
+            for temp_file in temp_files:
                 try:
-                    os.remove(input_path)
-                except:
-                    pass
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+                        self.callback.log(f"Cleaned up temp file: {temp_file}")
+                except Exception as e:
+                    self.callback.log(f"Failed to clean up {temp_file}: {str(e)}")
 
     def _is_youtube_url(self, url):
         try:
@@ -248,23 +301,76 @@ class TranscriptionWorker:
             return False
 
     def _download_youtube_audio(self, url):
-        temp_path = f"temp_audio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': temp_path,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'quiet': True,
-        }
+        """Download YouTube audio with improved error handling and path management"""
+        import os
+        import tempfile
+        from datetime import datetime
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        return temp_path
+        try:
+            # Create temp file in system temp directory
+            temp_dir = tempfile.gettempdir()
+            temp_filename = f"scribey_yt_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            temp_path = os.path.join(temp_dir, temp_filename)
+            
+            self.callback.log(f"Downloading to: {temp_path}")
+            
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': temp_path,  # No extension - let yt-dlp handle it
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'quiet': True,
+                'no_warnings': True,
+                'progress_hooks': [self._download_progress_hook]
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                self.callback.log("Starting YouTube download...")
+                ydl.download([url])
+                
+                # The actual file will have .mp3 extension added by yt-dlp
+                final_path = temp_path + '.mp3'
+                
+                # Verify file exists after download
+                if not os.path.exists(final_path):
+                    # Try alternate path (some yt-dlp versions handle this differently)
+                    alt_path = temp_path + '.audio.mp3'
+                    if os.path.exists(alt_path):
+                        final_path = alt_path
+                    else:
+                        # List all files in temp directory for debugging
+                        files = os.listdir(temp_dir)
+                        matching_files = [f for f in files if f.startswith(temp_filename)]
+                        if matching_files:
+                            final_path = os.path.join(temp_dir, matching_files[0])
+                        else:
+                            raise FileNotFoundError(f"Downloaded file not found. Tried paths:\n"
+                                                f"- {final_path}\n"
+                                                f"- {alt_path}")
+                
+                self.callback.log(f"Download completed: {final_path}")
+                return final_path
+            
+        except Exception as e:
+            self.callback.log(f"Download error: {str(e)}")
+            raise Exception(f"YouTube download failed: {str(e)}")
 
-
+    def _download_progress_hook(self, d):
+        """Progress hook for YouTube download"""
+        if d['status'] == 'downloading':
+            try:
+                # Remove ANSI color codes from the percentage string
+                percent = d['_percent_str'].replace('[0;94m', '').replace('[0m', '')
+                speed = d.get('_speed_str', 'N/A').replace('[0;32m', '').replace('[0m', '')
+                self.callback.on_status(f"Downloading: {percent.strip()} at {speed.strip()}")
+            except:
+                pass
+        elif d['status'] == 'finished':
+            self.callback.on_status("Download finished, processing audio...")
+            
     def _add_speaker_diarization(self, whisper_result, audio_path):
         """Add speaker diarization with chunking for large files"""
         import time
@@ -504,6 +610,7 @@ class TranscriptionGUI:
         self.batch_processing = tk.BooleanVar(value=self.settings.current["batch_processing"])
         self.input_paths = []
         self.output_path = tk.StringVar()
+        self.youtube_titles = {}
         
         # Initialize worker
         self.worker = TranscriptionWorker(self)
@@ -590,10 +697,10 @@ class TranscriptionGUI:
         input_frame = ttk.LabelFrame(parent, text="Input", padding="5")
         input_frame.pack(fill="x", padx=5, pady=5)
         
-        ttk.Radiobutton(input_frame, text="Local File(s)", 
+        ttk.Radiobutton(input_frame, text="Local Files", 
                        variable=self.input_type, value="file",
                        command=self.toggle_input_mode).pack(side="left")
-        ttk.Radiobutton(input_frame, text="YouTube URL", 
+        ttk.Radiobutton(input_frame, text="YouTube URLs", 
                        variable=self.input_type, value="youtube",
                        command=self.toggle_input_mode).pack(side="left")
         
@@ -603,6 +710,13 @@ class TranscriptionGUI:
         
         self.files_list = tk.Listbox(self.files_frame, selectmode=tk.EXTENDED)
         self.files_list.pack(fill="both", expand=True, side="left")
+
+        # Add placeholder text
+        self.files_list.insert(tk.END, "Drag files here or use 'Add Files/URLs' button")
+        self.files_list.config(foreground="gray")
+        
+        # Bind the list change handler
+        self.files_list.bind('<<ListboxSelect>>', self.on_list_change)
 
         self.files_list.drop_target_register(DND_FILES)
         self.files_list.dnd_bind('<<Drop>>', self.handle_drop)
@@ -618,11 +732,18 @@ class TranscriptionGUI:
         
         ttk.Button(btn_frame, text="Add Files", 
                   command=self.add_files).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="Add YouTube URL", 
+                  command=self.add_youtube_url).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Remove Selected", 
                   command=self.remove_selected).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Clear All", 
                   command=self.clear_files).pack(side="left", padx=5)
         
+        help_text = ttk.Label(input_frame, 
+            text="You can add multiple files or YouTube URLs to the queue",
+            foreground="gray")
+        help_text.pack(side="right", padx=5)
+
         # Output section
         output_frame = ttk.LabelFrame(parent, text="Output", padding="5")
         output_frame.pack(fill="x", padx=5, pady=5)
@@ -690,10 +811,23 @@ class TranscriptionGUI:
         self.log_text = scrolledtext.ScrolledText(log_frame, height=8)
         self.log_text.pack(fill="both", expand=True)
 
+    def on_list_change(self, event=None):
+        """Clear placeholder text when items are added"""
+        if self.files_list.size() == 1 and \
+        self.files_list.get(0) == "Drag files here or use 'Add Files/URLs' button":
+            self.files_list.delete(0)
+            self.files_list.config(foreground="black")
+
     def get_output_filename(self, input_path, index=0):
-        """Generate output filename based on settings"""
+        """Updated filename generation for YouTube videos"""
         if self.naming_mode.get() == "auto":
-            base = os.path.splitext(os.path.basename(input_path))[0]
+            if input_path in self.youtube_titles:
+                # Use video title for YouTube URLs
+                base = self.youtube_titles[input_path]
+                # Clean the title for use as filename
+                base = "".join(c for c in base if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            else:
+                base = os.path.splitext(os.path.basename(input_path))[0]
             return f"{base}_transcript.txt"
         else:
             prefix = self.custom_prefix.get() or "transcript"
@@ -813,35 +947,85 @@ class TranscriptionGUI:
         pass
 
     def toggle_input_mode(self):
+        """Updated toggle function to handle YouTube mode better"""
         is_file = self.input_type.get() == "file"
-        self.files_list["state"] = "normal" if is_file else "disabled"
-        self.batch_processing.set(is_file)
+        
+        # Update button states
+        self.add_files_btn["state"] = "normal" if is_file else "disabled"
+        self.add_url_btn["state"] = "disabled" if is_file else "normal"
+        
+        # Enable/disable drag and drop
+        if is_file:
+            self.files_list.drop_target_register(DND_FILES)
+        else:
+            try:
+                self.files_list.drop_target_unregister()
+            except:
+                pass
+                    
+        # Keep batch processing enabled for both modes
+        self.batch_processing["state"] = "normal"
 
     def add_files(self):
-        if self.input_type.get() == "file":
-            files = filedialog.askopenfilenames(
-                filetypes=[("Audio/Video files", 
-                          "*.mp3 *.wav *.mp4 *.avi *.mov *.mkv *.m4a *.webm")]
-            )
-            for file in files:
-                if file not in self.input_paths:
-                    self.input_paths.append(file)
-                    self.files_list.insert(tk.END, os.path.basename(file))
-        else:
-            url = simpledialog.askstring("YouTube URL", "Enter YouTube URL:")
-            if url:
-                self.input_paths.append(url)
-                self.files_list.insert(tk.END, url)
+        """Handle adding local files"""
+        files = filedialog.askopenfilenames(
+            filetypes=[("Audio/Video files", 
+                      "*.mp3 *.wav *.mp4 *.avi *.mov *.mkv *.m4a *.webm")]
+        )
+        for file in files:
+            if file not in self.input_paths:
+                self.input_paths.append(file)
+                self.files_list.insert(tk.END, os.path.basename(file))
+
+    def add_youtube_url(self):
+        """Handle adding YouTube URLs with improved UI"""
+        dialog = YouTubeInputDialog(self.root)
+        url = dialog.result
+        
+        if url:
+            if url not in self.input_paths:
+                # Show loading indicator
+                self.status_label["text"] = "Fetching video info..."
+                self.root.update()
+                
+                try:
+                    # Get video title
+                    ydl_opts = {
+                        'quiet': True,
+                        'no_warnings': True,
+                        'extract_flat': True
+                    }
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                        title = info.get('title', url)
+                        
+                    self.input_paths.append(url)
+                    self.youtube_titles[url] = title
+                    display_text = f"🎬 {title}"  # Using emoji for visual distinction
+                    self.files_list.insert(tk.END, display_text)
+                    
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to fetch video info: {str(e)}")
+                finally:
+                    self.status_label["text"] = "Ready"
+            else:
+                messagebox.showwarning("Warning", "This URL is already in the queue.")
 
     def remove_selected(self):
+        """Updated remove function to handle YouTube entries"""
         selected = self.files_list.curselection()
         for index in reversed(selected):
+            path = self.input_paths[index]
             self.files_list.delete(index)
             self.input_paths.pop(index)
+            if path in self.youtube_titles:
+                del self.youtube_titles[path]
 
     def clear_files(self):
-        self.files_list.delete(0, tk.END)
-        self.input_paths.clear()
+            """Updated clear function to handle YouTube entries"""
+            self.files_list.delete(0, tk.END)
+            self.input_paths.clear()
+            self.youtube_titles.clear()
 
     def browse_output(self):
         directory = filedialog.askdirectory()
