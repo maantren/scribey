@@ -372,122 +372,112 @@ class TranscriptionWorker:
             self.callback.on_status("Download finished, processing audio...")
             
     def _add_speaker_diarization(self, whisper_result, audio_path):
-        """Add speaker diarization with chunking for large files"""
-        import time
-        from pydub import AudioSegment
-        import numpy as np
-        import torch
-        from pyannote.audio import Pipeline
-        import tempfile
-        import os
-        
-        process_start_time = time.time()  # Renamed to avoid conflict
-        chunk_duration = 30 * 60  # 30 minutes in seconds
-        
         try:
-            # Load audio file
-            audio = AudioSegment.from_file(audio_path)
-            total_duration = len(audio) / 1000  # Convert to seconds
+            from pyannote.audio import Pipeline
+            import soundfile as sf
+            import librosa
+            import tempfile
+            import os
+            settings = Settings().current
+            token = settings.get("hf_token")
             
-            # Log GPU availability
-            gpu_available = torch.cuda.is_available()
-            self.callback.on_status(f"GPU {'available' if gpu_available else 'not available'} for diarization")
+            if not token:
+                raise ValueError("No HuggingFace token found in settings")
             
-            # Initialize pipeline
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization",
-                use_auth_token=self.callback.settings.current.get("hf_token")
-            )
+            # Suppress torchaudio warning
+            import warnings
+            warnings.filterwarnings("ignore", message=".*torchaudio.*backend.*")
             
-            if gpu_available:
-                pipeline = pipeline.to(torch.device("cuda"))
-            
-            all_speakers = []
-            
-            # Process in chunks
-            for chunk_start in range(0, len(audio), chunk_duration * 1000):
-                chunk_end = min(chunk_start + chunk_duration * 1000, len(audio))
+            try:
+                # Convert audio to WAV format first
+                self.callback.on_status("Converting audio format...")
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_wav:
+                    temp_wav_path = temp_wav.name
+                    # Load and resample audio
+                    y, sr = librosa.load(audio_path, sr=16000)
+                    sf.write(temp_wav_path, y, sr, format='WAV')
                 
-                # Extract chunk
-                chunk = audio[chunk_start:chunk_end]
+                # First try to load the pipeline
+                self.callback.on_status("Loading diarization model...")
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization@2.1",
+                    use_auth_token=token
+                )
+
+                self.callback.on_status("Performing speaker diarization...")
+                diarization = pipeline(temp_wav_path)
                 
-                # Save chunk to temporary file
-                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                    chunk.export(temp_file.name, format='wav')
+                # Process results
+                speakers = []
+                for turn, _, speaker in diarization.itertracks(yield_label=True):
+                    speakers.append({
+                        'start': turn.start,
+                        'end': turn.end,
+                        'speaker': speaker
+                    })
+                
+                # Clean up temporary file
+                try:
+                    os.remove(temp_wav_path)
+                except:
+                    pass
                     
-                    try:
-                        # Process chunk
-                        self.callback.on_status(
-                            f"Processing audio segment {chunk_start/1000:.0f}s - {chunk_end/1000:.0f}s..."
-                        )
-                        diarization = pipeline(temp_file.name)
+                # Add speaker information to whisper segments
+                for segment in whisper_result.get("segments", []):
+                    if not isinstance(segment, dict):
+                        continue
                         
-                        # Adjust timestamps and collect speakers
-                        for turn, _, speaker in diarization.itertracks(yield_label=True):
-                            all_speakers.append({
-                                'start': turn.start + (start_time/1000),  # Convert to seconds
-                                'end': turn.end + (start_time/1000),
-                                'speaker': speaker
-                            })
-                    finally:
-                        # Clean up temp file
-                        try:
-                            os.unlink(temp_file.name)
-                        except:
-                            pass
-            
-            # Sort speakers by start time
-            all_speakers.sort(key=lambda x: x['start'])
-            
-            # Merge adjacent segments with same speaker
-            merged_speakers = []
-            current = None
-            
-            for speaker in all_speakers:
-                if current is None:
-                    current = speaker.copy()
-                elif (speaker['speaker'] == current['speaker'] and 
-                      speaker['start'] - current['end'] < 0.5):  # 500ms threshold
-                    current['end'] = speaker['end']
-                else:
-                    merged_speakers.append(current)
-                    current = speaker.copy()
+                    start_time = segment.get('start', 0)
+                    end_time = segment.get('end', 0)
                     
-            if current:
-                merged_speakers.append(current)
-            
-            # Reset speaker map for new file
-            self.speaker_map = {}
-            
-            # Add speaker information to whisper segments
-            for segment in whisper_result["segments"]:
-                matching_speakers = []
-                for speaker in merged_speakers:
-                    if (segment['start'] >= speaker['start'] and 
-                        segment['end'] <= speaker['end']):
-                        matching_speakers.append(speaker['speaker'])
+                    matching_speakers = []
+                    for speaker in speakers:
+                        if (start_time >= speaker['start'] and 
+                            end_time <= speaker['end']):
+                            matching_speakers.append(speaker['speaker'])
+                    
+                    if matching_speakers:
+                        from collections import Counter
+                        segment['speaker'] = Counter(matching_speakers).most_common(1)[0][0]
+                    else:
+                        segment['speaker'] = "UNKNOWN"
                 
-                if matching_speakers:
-                    # Use most common speaker if multiple matches
-                    from collections import Counter
-                    original_speaker = Counter(matching_speakers).most_common(1)[0][0]
-                    segment['speaker'] = self._get_speaker_label(original_speaker)
-                else:
-                    segment['speaker'] = "UNKNOWN"
-            
-            total_time = time.time() - process_start_time
-            self.callback.log(f"Total diarization time for {total_duration:.1f}s audio: {total_time:.1f}s")
-            
-            # Log speaker mapping for reference
-            self.callback.log("\nSpeaker mapping:")
-            for original, friendly in self.speaker_map.items():
-                self.callback.log(f"Speaker {friendly} (original ID: {original})")
-            
-            return whisper_result
-            
+                return whisper_result
+
+            except Exception as e:
+                error_msg = str(e)
+                if "gated" in error_msg.lower() or "private" in error_msg.lower():
+                    error_msg = (
+                        "Please accept the model terms for both:\n"
+                        "1. https://huggingface.co/pyannote/speaker-diarization\n"
+                        "2. https://huggingface.co/pyannote/segmentation\n\n"
+                        "After accepting, ensure your token has 'read' access."
+                    )
+                elif "Format not recognised" in str(e):
+                    error_msg = (
+                        "Audio format not supported directly.\n"
+                        "Converting to compatible format..."
+                    )
+                elif "connection" in error_msg.lower():
+                    error_msg = "Failed to connect. Please check your internet connection."
+                
+                dialog = ChoiceDialog(
+                    self.callback.root,
+                    "Diarization Failed",
+                    f"Diarization failed: {error_msg}\n\nWhat would you like to do?"
+                )
+                
+                if dialog.result == 1:  # Continue without
+                    return whisper_result
+                elif dialog.result == 2:  # Try alternative
+                    return self._alternative_diarization(whisper_result, audio_path)
+                else:  # Cancel
+                    raise ValueError("Transcription cancelled by user")
+
         except Exception as e:
-            self.callback.log(f"Diarization error: {str(e)}")
-            self.callback.log(f"Failed after {time.time() - start_time:.1f} seconds")
+            self.callback.on_status(f"Diarization failed: {str(e)}")
+            import traceback
+            self.callback.log(f"Full diarization error:\n{traceback.format_exc()}")
             
             dialog = ChoiceDialog(
                 self.callback.root,
@@ -495,11 +485,11 @@ class TranscriptionWorker:
                 f"Diarization failed: {str(e)}\n\nWhat would you like to do?"
             )
             
-            if dialog.result == 1:  # Continue without
+            if dialog.result == 1:
                 return whisper_result
-            elif dialog.result == 2:  # Try alternative
+            elif dialog.result == 2:
                 return self._alternative_diarization(whisper_result, audio_path)
-            else:  # Cancel
+            else:
                 raise ValueError("Transcription cancelled by user")
 
     def _alternative_diarization(self, whisper_result, audio_path):
