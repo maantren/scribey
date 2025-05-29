@@ -2,7 +2,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import threading
-import whisper
+# import whisper
+from faster_whisper import WhisperModel
 import yt_dlp
 import os
 import sys
@@ -23,9 +24,19 @@ import subprocess
 from pathlib import Path
 
 # Constants and Configuration
+
+HAS_DIARIZATION = True
+try:
+    from pyannote.audio import Pipeline
+    import soundfile as sf
+    import librosa
+except ImportError:
+    HAS_DIARIZATION = False
+    print("Speaker diarization unavailable - missing dependencies")
+
 DEPENDENCIES = {
-    'base': ['openai-whisper', 'yt-dlp', 'tkinterdnd2', 'ffmpeg-python'],
-    'diarization': ['pyannote.audio', 'torch'],
+    'base': ['faster-whisper', 'yt-dlp', 'tkinterdnd2', 'ffmpeg-python'],
+    'diarization': ['pyannote.audio', 'torch'] if HAS_DIARIZATION else [],
     'enhanced_formats': ['pandas']
 }
 
@@ -35,6 +46,8 @@ To use speaker diarization, you need a HuggingFace token:
 2. Create a new token
 3. Save it in the settings
 """
+
+
 
 class YouTubeInputDialog(tk.Toplevel):
     def __init__(self, parent):
@@ -165,8 +178,8 @@ class DependencyManager:
         
         for package in required:
             try:
-                if package == 'openai-whisper':
-                    import whisper
+                if package == 'faster-whisper':
+                    from faster_whisper import WhisperModel
                 elif package == 'ffmpeg-python':
                     # Try running ffmpeg directly
                     result = subprocess.run(['ffmpeg', '-version'], 
@@ -263,11 +276,24 @@ class TranscriptionWorker:
 
             # Load model
             self.callback.on_status("Loading Whisper model...")
-            model = whisper.load_model(self.callback.model_size.get())
+            model_size = self.callback.model_size.get()
+            model = WhisperModel(model_size, device="cpu", compute_type="int8")
 
             # Transcribe
             self.callback.on_status("Transcribing audio...")
-            result = model.transcribe(processed_input)
+            segments, info = model.transcribe(processed_input, beam_size=5)
+
+            # Convert to compatible format
+            result = {
+                "segments": []
+            }
+
+            for segment in segments:
+                result["segments"].append({
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": segment.text
+                })
 
             # Handle diarization if requested
             if options.get("use_diarization"):
@@ -900,6 +926,14 @@ class TranscriptionGUI:
     def check_diarization(self):
         """Modified check_diarization method"""
         if self.speaker_diarization.get():
+            if not HAS_DIARIZATION:
+                messagebox.showwarning("Feature Unavailable", 
+                    "Speaker diarization is not available.\n"
+                    "Some required packages couldn't be installed with Python 3.13.\n"
+                    "You can still use transcription without speaker identification.")
+                self.speaker_diarization.set(False)
+                return
+                
             missing = DependencyManager.check_dependencies('diarization')
             if missing:
                 if messagebox.askyesno("Missing Dependencies", 
